@@ -1,0 +1,74 @@
+name: Deploy kitsu to itl-server
+
+# Workflow distinct de release.yml (CI CGWire upstream qui build la branche `build`).
+# Celui-ci deploie kitsu sur le serveur bare-metal itl-server via le pattern
+# self-hosted runner GitHub Actions + ship/scripts/release.sh.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      env:
+        description: 'Environment (staging or prod)'
+        required: true
+        type: choice
+        options:
+          - staging
+          - prod
+        default: staging
+      version:
+        description: 'kitsu version (e.g. 1.0.0-import — no v prefix)'
+        required: true
+        default: '1.0.0-import'
+
+# Convention unifiee (zou/mother/xen/kitsu) :
+#   git tag v1.0.0-import           -> deploys to prod    (version=1.0.0-import)
+#   git tag v1.0.0-import-staging   -> deploys to staging (version=1.0.0-import)
+#   workflow_dispatch               -> manual trigger, choose env + version (sans prefixe v)
+#
+# release.sh re-ajoute le prefixe v automatiquement pour `git checkout` (case kitsu).
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, itl-server, kitsu]
+    steps:
+      - name: Parse env + version
+        id: parse
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "env=${{ inputs.env }}" >> $GITHUB_OUTPUT
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+            echo "[parse] manual: env=${{ inputs.env }} version=${{ inputs.version }}"
+          elif [[ "${{ github.ref_name }}" == *-staging ]]; then
+            RAW="${GITHUB_REF_NAME%-staging}"
+            echo "env=staging" >> $GITHUB_OUTPUT
+            echo "version=${RAW#v}" >> $GITHUB_OUTPUT
+            echo "[parse] tag staging: env=staging version=${RAW#v}"
+          else
+            echo "env=prod" >> $GITHUB_OUTPUT
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+            echo "[parse] tag prod: env=prod version=${GITHUB_REF_NAME#v}"
+          fi
+
+      - name: Checkout ship (release tooling)
+        uses: actions/checkout@v4
+        with:
+          repository: irrational-studio/ship
+          path: ship
+          token: ${{ secrets.SHIP_READ_TOKEN }}
+
+      - name: Verify release.sh present + executable
+        run: |
+          ls -la ship/scripts/release.sh
+          head -5 ship/scripts/release.sh
+
+      - name: Execute release.sh
+        run: |
+          echo "::group::Deploying kitsu ${{ steps.parse.outputs.version }} to ${{ steps.parse.outputs.env }}"
+          sudo /home/github-runner-kitsu/actions-runner/_work/kitsu/kitsu/ship/scripts/release.sh \
+            kitsu \
+            ${{ steps.parse.outputs.env }} \
+            ${{ steps.parse.outputs.version }}
+          echo "::endgroup::"
